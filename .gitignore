@@ -1,0 +1,31 @@
+# AdGuard Home runtime data
+adguardhome/work/*
+!adguardhome/work/.gitkeep
+
+# Live AdGuard config (contains hashed admin password and potentially sensitive
+# client names / rewrite targets). The sanitized template
+# adguardhome/conf/AdGuardHome.yaml.example is committed instead.
+adguardhome/conf/AdGuardHome.yaml
+
+# UniFi runtime data (MongoDB, certs, logs, etc.)
+unifi/config/*
+!unifi/config/.gitkeep
+
+# Keep the backup directory tracked but ignore actual backup files
+unifi/backups/*.unf
+unifi/backups/*.gz
+
+# MongoDB data
+mongo/data/*
+!mongo/data/.gitkeep
+
+# Local backup archives (from backup.sh cron)
+backups/*.tar.gz
+backups/*.archive.gz
+
+# Environment secrets
+.env
+
+# OS junk
+.DS_Store
+Thumbs.db
