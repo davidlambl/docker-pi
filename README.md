@@ -130,12 +130,25 @@ Pick one approach:
 
 ### 2.2 Verify NVMe boot order
 
+If the Pi 5 boots successfully from the NVMe in step 2.1, the boot order is already
+correct and you can skip this section. You only need this if the Pi 5 **won't boot
+from NVMe** and you had to fall back to an SD card to get in.
+
+SSH into the Pi 5 and run:
+
 ```bash
 sudo rpi-eeprom-config
-# Confirm BOOT_ORDER includes NVMe (value 6). Default Pi 5 EEPROMs prefer NVMe.
-# If not, update with:
+```
+
+Look for `BOOT_ORDER` in the output. It should contain the value `6` (NVMe). The
+default Pi 5 EEPROM already prefers NVMe, but if it's missing, update it:
+
+```bash
 sudo rpi-eeprom-config --edit
-# Set: BOOT_ORDER=0xf416
+# Change (or add) the BOOT_ORDER line to:
+#   BOOT_ORDER=0xf416
+# Save and exit, then reboot:
+sudo reboot
 ```
 
 ### 2.3 Static IP
@@ -179,20 +192,28 @@ docker --version
 docker compose version
 ```
 
-### 3.3 Disable systemd-resolved stub listener
+### 3.3 Free port 53 for AdGuard Home
 
-AdGuard Home needs to bind port 53. The default `systemd-resolved` stub listener
-occupies it.
+AdGuard Home needs to bind port 53. On some distros, `systemd-resolved` runs a stub
+listener on that port. Raspberry Pi OS Lite does **not** ship with `systemd-resolved`,
+so if you're on Pi OS Lite you can skip straight to setting `/etc/resolv.conf` below.
+
+**Only if `systemd-resolved` is present** (e.g. Ubuntu Server or desktop Pi OS):
 
 ```bash
 sudo sed -i 's/#DNSStubListener=yes/DNSStubListener=no/' /etc/systemd/resolved.conf
 sudo systemctl restart systemd-resolved
+```
 
-# Replace the resolv.conf symlink with a static file pointing to a temporary upstream.
-# After AdGuard is running, this will resolve through localhost.
-sudo rm /etc/resolv.conf
+**All installs — set a temporary upstream nameserver:**
+
+```bash
+sudo rm -f /etc/resolv.conf
 echo "nameserver 1.1.1.1" | sudo tee /etc/resolv.conf
 ```
+
+Once AdGuard Home is running, you can optionally point this at `127.0.0.1` so the
+Pi itself resolves through AdGuard.
 
 ### 3.4 Firewall (optional but recommended)
 
@@ -251,16 +272,34 @@ cd /opt/docker-pi
 cp .env.example .env
 ```
 
-Edit `.env` and set real passwords for `MONGO_INITDB_ROOT_PASSWORD` and `MONGO_PASS`.
-Use strong random values:
+Generate two random passwords (copy each output — you'll need them in a moment):
 
 ```bash
-# Generate random passwords
-openssl rand -base64 24    # use output for MONGO_INITDB_ROOT_PASSWORD
-openssl rand -base64 24    # use output for MONGO_PASS
+openssl rand -base64 24
+openssl rand -base64 24
 ```
 
-Adjust `TZ` and `PUID`/`PGID` if your user is not UID/GID 1000 (`id` to check).
+Open `.env` in an editor:
+
+```bash
+nano .env
+```
+
+Find these two lines and replace the placeholder values with the passwords you just
+generated:
+
+```
+MONGO_INITDB_ROOT_PASSWORD=CHANGEME_root_password    ← paste first password
+MONGO_PASS=CHANGEME_unifi_password                   ← paste second password
+```
+
+The other defaults should be fine as-is:
+
+- `PUID`/`PGID`: should match your user. Run `id` — if you see `uid=1000` and
+  `gid=1000`, no change needed.
+- `TZ`: set to `America/New_York`. Change if you're in a different timezone.
+
+Save and exit (`Ctrl+O`, `Enter`, `Ctrl+X` in nano).
 
 ### 4.2 Restore AdGuard Home config (optional)
 
