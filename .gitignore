@@ -13,7 +13,11 @@ unifi/config/*
 
 # Keep the backup directory tracked but ignore actual backup files
 unifi/backups/*.unf
+unifi/backups/*.unifi
 unifi/backups/*.gz
+
+# Backup tarballs in repo root (from scp during migration)
+adguard-backup*.tar.gz
 
 # MongoDB data
 mongo/data/*

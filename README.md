@@ -1,14 +1,13 @@
 # docker-pi
 
-Docker Compose stack for a Raspberry Pi 5 running **AdGuard Home** (DNS) and
-**UniFi Network Application** (wireless controller), migrated from a Pi 4 and an
-N150 mini-PC respectively.
+Docker Compose stack for a Raspberry Pi running **AdGuard Home** (DNS sinkhole) and
+**UniFi Network Application** (wireless controller).
 
 ## Architecture
 
 ```
-LAN clients ──DNS:53──▶ Firewalla ──forward──▶ Pi 5 (AdGuard Home) ──DoH/DoT──▶ NextDNS
-UniFi APs ──inform:8080──▶ Pi 5 (UniFi Network Application) ──▶ MongoDB (internal)
+LAN clients ──DNS:53──▶ Router ──forward──▶ Pi (AdGuard Home) ──DoH/DoT──▶ Upstream DNS
+UniFi APs ──inform:8080──▶ Pi (UniFi Network Application) ──▶ MongoDB (internal)
 ```
 
 - **AdGuard Home** runs with `network_mode: host` so it owns port 53 directly.
@@ -22,158 +21,198 @@ See [docs/decisions.md](docs/decisions.md) for full rationale.
 
 ## Prerequisites
 
-- Raspberry Pi 5 with NVMe drive
-- Raspberry Pi OS Lite (64-bit) imaged onto the NVMe
+- Raspberry Pi (tested on Pi 5; Pi 4 with 4GB+ should also work)
+- Storage: NVMe drive, SD card, or both (see Phase 2 for options)
 - Ethernet connection to LAN
-- Static IP reserved in Firewalla DHCP (ideally reusing the N150's current IP —
-  see Phase 2)
-- SSH access to the Pi 5 from your workstation
+- Static IP reserved in your router's DHCP settings
+- SSH access to the Pi from your workstation
 
 ---
 
-## Phase 1 — Capture state from existing boxes
+## Phase 1 — Back up existing services (migration only)
 
-### 1.1 Back up AdGuard Home from the Pi 4
+Skip this phase if you're doing a fresh install with no prior AdGuard or UniFi setup.
 
-Try in order:
+### 1.1 Back up AdGuard Home
 
-**Plan A — SSH from the N150 (or another LAN host that can reach the Pi 4):**
+SSH into the machine currently running AdGuard Home and create a tarball:
 
 ```bash
-# From the N150, SSH into the Pi 4
-ssh <pi4-user>@192.168.231.145
+# Native install (adjust the path to wherever AdGuard Home lives):
+sudo tar czf /tmp/adguard-backup.tar.gz -C /home/<user> AdGuardHome/
+# or: sudo tar czf /tmp/adguard-backup.tar.gz -C /opt AdGuardHome/
 
-# Native install — grab config + data
-sudo tar czf /tmp/adguard-backup.tar.gz /opt/AdGuardHome/
-
-# Or if AdGuard was running in Docker, find the volume:
+# Docker install — find the bound volume first:
 docker inspect adguardhome | grep -A5 Mounts
-# Then tar the bound directories instead.
-
-# Copy the archive to the N150
-exit
-scp <pi4-user>@192.168.231.145:/tmp/adguard-backup.tar.gz ~/
+# Then tar the conf and work directories.
 ```
 
-Then transfer from the N150 to your Mac (or directly to the Pi 5 later).
+Copy the tarball to your workstation:
 
-**Plan B — SD card extraction (if the Pi 4 is unreachable from all hosts):**
+```bash
+scp <user>@<old-host>:/tmp/adguard-backup.tar.gz ~/
+```
 
-1. Power off the Pi 4 and remove the SD card.
-2. Insert into your Mac via a USB reader.
-3. macOS cannot read ext4 natively. Options:
-   - Start a quick Linux VM (UTM, Multipass, or Docker) and pass through the USB
-     device to mount the ext4 partition.
-   - Use a Linux machine if one is available.
-4. Copy `/opt/AdGuardHome/AdGuardHome.yaml` and `/opt/AdGuardHome/data/` from the
-   mounted filesystem.
+**If SSH is unavailable**, power off the machine and mount its storage (SD card, SSD)
+on another computer to copy the files directly.
 
 **What you need from the backup:**
 
 | File / directory                     | Purpose                                  |
 |--------------------------------------|------------------------------------------|
-| `AdGuardHome.yaml`                   | All settings: upstreams, filters, rewrites, DHCP, clients |
+| `AdGuardHome.yaml`                   | All settings: upstreams, filters, rewrites, clients |
 | `data/filters/`                      | Downloaded blocklist snapshots            |
 | `data/stats.db`                      | Query statistics                         |
 | `data/querylog.json` (or `.jsonl`)   | Query log history                        |
 | `data/sessions.db`                   | Login sessions (can be discarded)        |
 
-### 1.2 Back up UniFi from the N150
+### 1.2 Back up / migrate UniFi Network Application
 
-1. Open the UniFi OS Server web UI on the N150 (typically `https://<n150-ip>`).
-2. Navigate to **Settings → System → Backups**.
-3. Click **Download Backup** and save the `.unf` file.
-4. Note the **UniFi Network Application version** (Settings → System → About).
-   The destination Docker image must be **equal to or newer** than this version for
-   restore to succeed.
-5. Record the current controller IP/hostname and the number of adopted devices for
-   a post-migration sanity check.
+There are two approaches depending on your source setup.
 
-Place the `.unf` file in `unifi/backups/` in this repo (it is gitignored).
+**If migrating from a UniFi OS device (Cloud Key, UDM, or UniFi OS Server on PC):**
 
-### 1.3 Troubleshooting Mac → Pi 4 connectivity
+The OS-level backup ("Backup for All Applications and Settings") **cannot** be restored
+into a standalone Docker container. Use the **Export Site** migration wizard instead:
 
-Your Mac gets "No route to host" while the N150 can ping the Pi 4. This is almost
-certainly a VLAN or client-isolation change made in the UniFi network config recently.
-Check:
+1. Open the Network application on the source device.
+2. Go to **Settings → System → Site Management → Export Site**.
+3. Click **Export Site**, then **Download the Site Export File** (save it — this is
+   your backup of record).
+4. Click **Continue**. Enter the new controller's IP and port **8080** (the inform
+   port, not 8443).
+5. Select all devices, then click **Migrate Devices**. This pushes the site config
+   and re-adopts all devices to the new controller in one step.
 
-- Are the Mac and Pi 4 on the same VLAN / subnet? (`ifconfig` on Mac, compare subnets)
-- Is client isolation enabled on the SSID the Mac is using?
-- Is there a firewall rule on the Firewalla blocking inter-device traffic on that
-  subnet?
+Note the **Network Application version** on the source (shown at the bottom-left of
+the Network app UI). The destination Docker image must be equal to or newer.
 
-Fixing this is independent of the migration but worth resolving so you can manage the
-Pi 5 from your Mac afterward.
+**If migrating from a standalone UniFi Network Application (Docker, apt, etc.):**
+
+1. Navigate to **Settings → System → Backups**.
+2. Click **Download Backup** and save the `.unf` file.
+3. Note the Network Application version.
+
+Place backup files in `unifi/backups/` in this repo (gitignored).
 
 ---
 
-## Phase 2 — Pi 5 fresh install
+## Phase 2 — Pi setup
 
-### 2.1 Reimage the NVMe
+### 2.1 Choose a boot configuration
 
-Pick one approach:
+**Option A — Boot from NVMe (simpler):**
 
-- **USB enclosure method:** Remove the NVMe from the Pi 5, put it in a USB enclosure,
-  connect to your Mac, and use **Raspberry Pi Imager** to write
-  **Raspberry Pi OS Lite (64-bit)**. In Imager's advanced settings (gear icon):
-  - Set hostname (e.g. `pi5`)
-  - Enable SSH (password or key-based)
-  - Set username and password
-  - Optionally configure Wi-Fi (for initial headless setup before Ethernet is
-    connected)
-  - Set locale and timezone
-  Then reinstall the NVMe in the Pi 5 and boot.
+Use **Raspberry Pi Imager** to write **Raspberry Pi OS Lite (64-bit)** directly to
+the NVMe (via USB enclosure or by booting from a temporary SD card first). In Imager's
+advanced settings (gear icon), pre-configure hostname, SSH, username/password, locale,
+and optionally Wi-Fi.
 
-- **SD card bootstrap method:** Image a microSD with Raspberry Pi OS, boot from it,
-  then use `rpi-imager` or `dd` to reimage the NVMe in place. Shut down, remove SD,
-  and reboot from NVMe.
+**Option B — Boot from SD card, use NVMe as data drive (recommended if NVMe boot is
+unreliable):**
 
-### 2.2 Verify NVMe boot order
+Image a microSD card with Raspberry Pi OS Lite (64-bit) using the same Imager
+settings. Boot from the SD card, then format and mount the NVMe for Docker data:
 
-If the Pi 5 boots successfully from the NVMe in step 2.1, the boot order is already
-correct and you can skip this section. You only need this if the Pi 5 **won't boot
-from NVMe** and you had to fall back to an SD card to get in.
+```bash
+# Confirm the NVMe is detected
+lsblk
 
-SSH into the Pi 5 and run:
+# Wipe and create a single ext4 partition
+sudo parted /dev/nvme0n1 mklabel gpt
+sudo parted /dev/nvme0n1 mkpart primary ext4 0% 100%
+sudo mkfs.ext4 /dev/nvme0n1p1
+
+# Mount and persist across reboots
+sudo mkdir -p /mnt/nvme
+sudo mount /dev/nvme0n1p1 /mnt/nvme
+echo '/dev/nvme0n1p1 /mnt/nvme ext4 defaults,noatime 0 2' | sudo tee -a /etc/fstab
+sudo chown -R $USER:$USER /mnt/nvme
+```
+
+If the NVMe has an old OS on it that interferes with boot, wipe its partition table
+from another machine first (e.g. `diskutil eraseDisk ExFAT NVME /dev/diskN` on macOS,
+or `sudo parted /dev/nvme0n1 mklabel gpt` from a working Pi boot).
+
+### 2.2 NVMe boot order (Option A only)
+
+If the Pi boots successfully from NVMe, skip this. You only need it if the Pi
+**won't boot from NVMe** and you had to fall back to an SD card.
+
+SSH in and check:
 
 ```bash
 sudo rpi-eeprom-config
 ```
 
-Look for `BOOT_ORDER` in the output. It should contain the value `6` (NVMe). The
-default Pi 5 EEPROM already prefers NVMe, but if it's missing, update it:
+Look for `BOOT_ORDER` — it should contain `6` (NVMe). Default Pi 5 EEPROMs already
+prefer NVMe. If it's missing:
 
 ```bash
 sudo rpi-eeprom-config --edit
-# Change (or add) the BOOT_ORDER line to:
-#   BOOT_ORDER=0xf416
+# Change or add: BOOT_ORDER=0xf416
 # Save and exit, then reboot:
 sudo reboot
 ```
 
-### 2.3 Static IP
+### 2.3 Argon NEO 5 case fan driver (if applicable)
 
-Reserve the Pi 5's MAC address in Firewalla DHCP with a static IP.
+If you're using an **Argon NEO 5 M.2 NVMe case**, install the fan control driver.
+Without it, the fan runs at full speed.
 
-**Strong recommendation:** Reuse the N150's current IP address. This lets UniFi APs
-re-adopt automatically (their stored inform URL already points to this IP). Power off
-the N150 before booting the Pi 5 with the same IP.
+```bash
+curl https://download.argon40.com/argon-eeprom.sh | bash
+sudo reboot
+```
+
+After reboot:
+
+```bash
+curl https://download.argon40.com/argonneo5.sh | bash
+sudo reboot
+```
+
+You can adjust fan curves later with `argonone-config`.
+
+### 2.4 Auto-boot after power loss
+
+By default, the Pi 5 enters a halted state when power is restored after an outage
+(unlike the Pi 4 which auto-boots). Fix this so it behaves like a headless server:
+
+```bash
+sudo rpi-eeprom-config --edit
+```
+
+Set these values (add them if missing):
+
+```
+POWER_OFF_ON_HALT=0
+WAKE_ON_GPIO=1
+```
+
+Save and exit. The change takes effect on next reboot.
+
+### 2.5 Static IP
+
+Reserve the Pi's MAC address with a static IP in your router's DHCP settings.
+
+If migrating from an existing UniFi controller, **reuse the old controller's IP** so
+APs re-adopt automatically.
 
 ---
 
 ## Phase 3 — Host bootstrap
 
-Run these commands on the Pi 5 over SSH. Each section is a discrete concern, designed
-to map cleanly to an Ansible role later (see
-[docs/ansible-future.md](docs/ansible-future.md)).
+Run these on the Pi over SSH. Each section is a discrete concern, designed to map
+cleanly to an Ansible role later (see [docs/ansible-future.md](docs/ansible-future.md)).
 
 ### 3.1 System update and timezone
 
 ```bash
 sudo apt update && sudo apt full-upgrade -y
-sudo timedatectl set-timezone America/New_York    # adjust to your timezone
-sudo apt install -y unattended-upgrades
-sudo dpkg-reconfigure -plow unattended-upgrades   # enable auto security updates
+sudo timedatectl set-timezone <YOUR_TIMEZONE>   # e.g. America/New_York
+sudo apt install -y git unattended-upgrades
+sudo dpkg-reconfigure -plow unattended-upgrades  # enable auto security updates
 ```
 
 ### 3.2 Install Docker
@@ -181,15 +220,28 @@ sudo dpkg-reconfigure -plow unattended-upgrades   # enable auto security updates
 ```bash
 curl -fsSL https://get.docker.com | sudo sh
 sudo usermod -aG docker $USER
-# Log out and back in for the group change to take effect
 exit
 ```
 
-Verify after re-login:
+Log back in, then verify:
 
 ```bash
 docker --version
 docker compose version
+```
+
+**If using the SD + NVMe setup (Option B)**, move Docker's data root to the NVMe so
+container images and volumes don't wear out the SD card:
+
+```bash
+sudo systemctl stop docker
+sudo mkdir -p /mnt/nvme/docker-data
+echo '{"data-root": "/mnt/nvme/docker-data"}' | sudo tee /etc/docker/daemon.json
+sudo systemctl start docker
+
+# Verify
+docker info | grep "Docker Root Dir"
+# Should show: /mnt/nvme/docker-data
 ```
 
 ### 3.3 Free port 53 for AdGuard Home
@@ -247,20 +299,21 @@ sudo ufw status
 
 ### 3.5 Clone this repo
 
-```bash
-cd ~
-git clone https://github.com/<your-username>/docker-pi.git
-cd docker-pi
-```
-
-Or if you prefer `/opt`:
+**NVMe-only boot (Option A):**
 
 ```bash
-sudo mkdir -p /opt/docker-pi
-sudo chown $USER:$USER /opt/docker-pi
-git clone https://github.com/<your-username>/docker-pi.git /opt/docker-pi
-cd /opt/docker-pi
+git clone https://github.com/<your-username>/docker-pi.git ~/docker-pi
+cd ~/docker-pi
 ```
+
+**SD + NVMe (Option B):**
+
+```bash
+git clone https://github.com/<your-username>/docker-pi.git /mnt/nvme/docker-pi
+cd /mnt/nvme/docker-pi
+```
+
+All subsequent commands assume you're in the repo directory.
 
 ---
 
@@ -289,101 +342,145 @@ Find these two lines and replace the placeholder values with the passwords you j
 generated:
 
 ```
-MONGO_INITDB_ROOT_PASSWORD=CHANGEME_root_password    ← paste first password
-MONGO_PASS=CHANGEME_unifi_password                   ← paste second password
+MONGO_INITDB_ROOT_PASSWORD=CHANGEME_root_password    <- paste first password
+MONGO_PASS=CHANGEME_unifi_password                   <- paste second password
 ```
 
 The other defaults should be fine as-is:
 
 - `PUID`/`PGID`: should match your user. Run `id` — if you see `uid=1000` and
   `gid=1000`, no change needed.
-- `TZ`: set to `America/New_York`. Change if you're in a different timezone.
+- `TZ`: set to your timezone (e.g. `America/New_York`).
 
 Save and exit (`Ctrl+O`, `Enter`, `Ctrl+X` in nano).
 
 ### 4.2 Restore AdGuard Home config (optional)
 
-If you have a backup from Phase 1.1, extract `AdGuardHome.yaml` into the conf
-directory:
+If you have the backup tarball from Phase 1.1, copy it from the machine that has it
+to the Pi. Run this **from the machine with the backup** (not on the Pi):
 
 ```bash
-# From the backup tarball:
-tar xzf adguard-backup.tar.gz -C /tmp
-cp /tmp/opt/AdGuardHome/AdGuardHome.yaml ./adguardhome/conf/
-
-# Edit to change the admin UI port (avoid port 80 conflicts):
-# In AdGuardHome.yaml, find the http section and set:
-#   bind_host: 0.0.0.0
-#   bind_port: 8081
+scp adguard-backup.tar.gz <pi-user>@<pi-ip>:<repo-dir>/
 ```
 
-If you don't have a backup, you can either:
+Then **on the Pi**, extract and place the config:
+
+```bash
+tar xzf adguard-backup.tar.gz -C /tmp
+```
+
+The extracted path depends on how AdGuard was installed on the source machine. Find
+`AdGuardHome.yaml` and copy it into the conf directory:
+
+```bash
+# Adjust the path to match your backup structure:
+cp /tmp/AdGuardHome/AdGuardHome.yaml ./adguardhome/conf/
+# or: cp /tmp/opt/AdGuardHome/AdGuardHome.yaml ./adguardhome/conf/
+```
+
+Edit the config to move the admin UI off port 80:
+
+```bash
+nano ./adguardhome/conf/AdGuardHome.yaml
+```
+
+Find the `http` section near the top and set the address to port 8081:
+
+```yaml
+http:
+  address: 0.0.0.0:8081
+```
+
+Save and exit. Clean up the tarball: `rm adguard-backup.tar.gz`
+
+**If you don't have a backup**, you have two options:
 
 - **Use the template:** `cp adguardhome/conf/AdGuardHome.yaml.example adguardhome/conf/AdGuardHome.yaml`,
-  edit it (set your NextDNS config ID, generate a bcrypt password hash), and start.
-- **Use the wizard:** AdGuard Home will start its first-run wizard on port 3000.
-  Configure everything fresh through the web UI.
+  edit it (set your upstream DNS, generate a bcrypt password hash), and start.
+- **Use the wizard:** Skip this step entirely. AdGuard Home will start its first-run
+  wizard on port 3000 where you can configure everything through the web UI.
 
 ### 4.3 Start AdGuard Home
 
 ```bash
 docker compose up -d adguardhome
 docker compose logs -f adguardhome
-# Wait for "AdGuard Home is available at ..." then Ctrl+C
 ```
 
-**First-run (no backup):** Open `http://<pi5-ip>:3000` and complete the wizard.
+> **Note:** `Ctrl+C` here only stops the log tail — the container keeps running in
+> the background. Wait until you see "AdGuard Home is available at ..." then press
+> `Ctrl+C` to get your shell back.
+
+**First-run (no backup):** Open `http://<pi-ip>:3000` and complete the wizard.
 Set the admin UI to port 8081 during setup.
 
-**With restored config:** Open `http://<pi5-ip>:8081` (or whatever port was in your
+**With restored config:** Open `http://<pi-ip>:8081` (or whatever port was in your
 `AdGuardHome.yaml`).
 
-Validate DNS resolution from another machine:
+Validate DNS resolution from another machine on your network:
 
 ```bash
-dig @<pi5-ip> example.com
+dig @<pi-ip> example.com
 ```
 
-### 4.4 Point Firewalla DNS at the Pi 5
+### 4.4 Point your router's DNS at the Pi
 
-Once you've confirmed AdGuard Home is resolving queries:
+Once you've confirmed AdGuard Home is resolving queries, update your router's DNS
+settings to forward to the Pi's IP address.
 
-1. Open the Firewalla app.
-2. Go to **Network → DNS** (or equivalent for your Firewalla model).
-3. Change the DNS servers from NextDNS to the Pi 5's IP address.
-4. Optionally keep NextDNS as a secondary/fallback in Firewalla.
-
-Configure NextDNS as the **upstream** inside AdGuard Home (Settings → DNS Settings →
-Upstream DNS servers) to layer AdGuard's local filtering with NextDNS's cloud
-filtering.
+If you use an upstream filtering service (e.g. NextDNS, Cloudflare Gateway), configure
+it as the **upstream** inside AdGuard Home (Settings → DNS Settings → Upstream DNS
+servers) to layer AdGuard's local filtering with the cloud service.
 
 ### 4.5 Start MongoDB + UniFi Network Application
 
 ```bash
 docker compose up -d unifi-db
-# Wait ~30 seconds for MongoDB to initialize and run init-mongo.sh
-docker compose logs unifi-db | tail -20
-# Confirm you see "Successfully added user" or similar
-
-docker compose up -d unifi-network-application
-docker compose logs -f unifi-network-application
-# Wait for startup to complete (~2 minutes on first run), then Ctrl+C
 ```
 
-### 4.6 Restore UniFi backup
+Wait ~30 seconds for MongoDB to initialize and run the init script:
 
-1. Open `https://<pi5-ip>:8443` in your browser (accept the self-signed cert warning).
+```bash
+docker compose logs unifi-db | tail -20
+```
+
+Confirm you see "Successfully added user" or similar, then start UniFi:
+
+```bash
+docker compose up -d unifi-network-application
+docker compose logs -f unifi-network-application
+```
+
+> **Note:** `Ctrl+C` here only stops the log tail — the container keeps running in
+> the background. Wait for startup to complete (~2 minutes on first run), then press
+> `Ctrl+C` to get your shell back.
+
+### 4.6 Migrate or restore UniFi
+
+**If you used the Export Site wizard (from UniFi OS):**
+
+1. Open `https://<pi-ip>:8443` and complete the initial setup wizard (create a local
+   admin account, skip cloud login if you prefer).
+2. The migration wizard from Phase 1.2 will push the site config and devices
+   automatically. Check **Devices** in the web UI — they should appear as "Connected"
+   within a few minutes.
+3. If the migration wizard was already completed during Phase 1.2, devices should
+   already be adopting.
+
+**If you have a `.unf` backup file (from a standalone controller):**
+
+1. Open `https://<pi-ip>:8443` in your browser (accept the self-signed cert warning).
 2. The first-run wizard will appear. Choose **Restore from a previous backup**.
 3. Upload the `.unf` file from Phase 1.2 (`unifi/backups/` in this repo).
 4. Wait for the restore to complete and the controller to restart (~2-5 minutes).
 5. Log in with your existing UniFi credentials.
 
-### 4.7 AP re-adoption
+### 4.7 AP re-adoption (if devices didn't migrate automatically)
 
-**If you reused the N150's IP (recommended):**
+**If you reused the old controller's IP:**
 
-APs should reconnect automatically within a few minutes. Check
-**Devices** in the UniFi web UI — they should appear as "Connected" one by one.
+APs should reconnect automatically within a few minutes. Check **Devices** in the
+UniFi web UI — they should appear as "Connected" one by one.
 
 **If you used a different IP:**
 
@@ -391,15 +488,14 @@ SSH into each AP and manually set the new inform URL:
 
 ```bash
 ssh ubnt@<ap-ip>
-set-inform http://<pi5-ip>:8080/inform
-# Run it twice — UniFi sometimes needs the second attempt
-set-inform http://<pi5-ip>:8080/inform
+set-inform http://<pi-ip>:8080/inform
+set-inform http://<pi-ip>:8080/inform
 ```
 
 Default AP credentials: username `ubnt`, password `ubnt` (unless changed).
 
 Also update the inform host in the UniFi UI: **Settings → System → Advanced →
-Inform Host** — set it to the Pi 5's IP and check "Override".
+Inform Host** — set it to the Pi's IP and check "Override".
 
 ---
 
@@ -407,16 +503,16 @@ Inform Host** — set it to the Pi 5's IP and check "Override".
 
 Run through this checklist after cutover:
 
-- [ ] `dig @<pi5-ip> example.com` returns a valid answer from multiple machines
-- [ ] AdGuard Home query log (`http://<pi5-ip>:8081`) shows incoming queries
-- [ ] AdGuard upstream is NextDNS and queries are flowing to it
-- [ ] `https://<pi5-ip>:8443` loads the UniFi dashboard
+- [ ] `dig @<pi-ip> example.com` returns a valid answer from multiple machines
+- [ ] AdGuard Home query log (`http://<pi-ip>:8081`) shows incoming queries
+- [ ] AdGuard upstream DNS is configured and queries are flowing
+- [ ] `https://<pi-ip>:8443` loads the UniFi dashboard
 - [ ] All APs show "Connected" in UniFi Devices
 - [ ] Client count in UniFi matches expectations
 - [ ] Wi-Fi clients can connect and get internet access
 - [ ] Wired clients can resolve DNS
 - [ ] Historical data (stats, events) from the UniFi backup is visible
-- [ ] You can SSH into the Pi 5 from your Mac (confirms no VLAN/routing issues)
+- [ ] You can SSH into the Pi from your workstation
 
 ---
 
@@ -428,13 +524,12 @@ UniFi controller state lives in MongoDB, not in `unifi/config/` alone. The backu
 script uses `mongodump` to capture a consistent database snapshot alongside the
 file-level config archives.
 
-UniFi also generates its own `.unf` autobackup files inside `unifi/config/data/backup/autobackup/`.
-Enable autobackups in the UniFi UI (**Settings → System → Backups → Auto Backup**)
-and keep the default retention. The nightly script archives these as well.
+UniFi also generates its own `.unf` autobackup files inside
+`unifi/config/data/backup/autobackup/`. Enable autobackups in the UniFi UI
+(**Settings → System → Backups → Auto Backup**) and keep the default retention.
 
 ```bash
-# Create the backup script
-cat << 'SCRIPT' | sudo tee /opt/docker-pi/backup.sh
+cat << 'SCRIPT' | sudo tee <repo-dir>/backup.sh
 #!/bin/bash
 set -euo pipefail
 
@@ -476,11 +571,14 @@ find "$BACKUP_DIR" -name "*.archive.gz" -mtime +$RETENTION_DAYS -delete
 echo "Backup completed: $TIMESTAMP"
 SCRIPT
 
-sudo chmod +x /opt/docker-pi/backup.sh
+sudo chmod +x <repo-dir>/backup.sh
 
-# Add to cron (runs at 3:00 AM daily)
-(crontab -l 2>/dev/null; echo "0 3 * * * /opt/docker-pi/backup.sh >> /var/log/docker-pi-backup.log 2>&1") | crontab -
+# Add to cron (runs at 3:00 AM daily) — adjust the path to match your repo location
+(crontab -l 2>/dev/null; echo "0 3 * * * <repo-dir>/backup.sh >> /var/log/docker-pi-backup.log 2>&1") | crontab -
 ```
+
+Replace `<repo-dir>` with the absolute path to your repo (e.g. `/mnt/nvme/docker-pi`
+or `~/docker-pi`).
 
 **What each backup artifact covers:**
 
@@ -493,8 +591,7 @@ sudo chmod +x /opt/docker-pi/backup.sh
 For a complete UniFi restore you need **both** the MongoDB dump and the config dir
 (or just a recent `.unf` file from the autobackup directory — see Recovery below).
 
-Optionally `rsync` the backup directory to another host (N150, NAS, etc.) for
-off-device redundancy.
+Optionally `rsync` the backup directory to another host for off-device redundancy.
 
 ### Upgrades
 
@@ -505,7 +602,6 @@ off-device redundancy.
 4. Pull and restart:
 
 ```bash
-cd /opt/docker-pi
 docker compose pull
 docker compose up -d
 docker compose logs -f    # watch for errors
@@ -528,7 +624,7 @@ Periodically verify that a full restore works. There are two restore paths:
 1. Stop the stack: `docker compose down`
 2. Move data aside: `mv unifi/config unifi/config.bak && sudo mv mongo/data mongo/data.bak`
 3. Start fresh: `docker compose up -d`
-4. Open `https://<pi5-ip>:8443`, choose **Restore from a previous backup** in the wizard.
+4. Open `https://<pi-ip>:8443`, choose **Restore from a previous backup** in the wizard.
 5. Upload a `.unf` file (from `backups/` or from `unifi/config.bak/data/backup/autobackup/`).
 6. Confirm APs reconnect, data is present, DNS still works.
 7. Clean up: `rm -rf unifi/config.bak && sudo rm -rf mongo/data.bak`
@@ -561,26 +657,10 @@ docker exec -i unifi-db mongorestore \
 ### Container health checks
 
 ```bash
-# Quick status
-docker compose ps
-
-# Resource usage
-docker stats --no-stream
-
-# Service logs
-docker compose logs adguardhome --tail 50
-docker compose logs unifi-db --tail 50
-docker compose logs unifi-network-application --tail 50
+docker compose ps                # quick status
+docker stats --no-stream         # resource usage
+docker compose logs <service> --tail 50
 ```
-
-### Decommissioning old hardware
-
-Once the Pi 5 is stable and verified:
-
-- **N150 mini-PC:** Power off. Keep the `.unf` backup file saved elsewhere. The N150
-  can serve as a cold spare or be repurposed.
-- **Pi 4:** Power off. Keep the SD card as a backup of the old AdGuard config.
-  The Pi 4 can be repurposed or kept as a cold spare.
 
 ---
 
@@ -598,7 +678,7 @@ docker-pi/
 │   │                                  # AdGuardHome.yaml is gitignored (has secrets)
 │   └── work/                    # Runtime data (gitignored)
 ├── unifi/
-│   ├── config/                  # UniFi app data + MongoDB (gitignored)
+│   ├── config/                  # UniFi app data (gitignored)
 │   └── backups/                 # Place .unf files here for restore
 ├── mongo/
 │   └── data/                    # MongoDB data files (gitignored)

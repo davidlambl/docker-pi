@@ -40,7 +40,7 @@ services:
   # Bridge network for MongoDB access; host ports mapped explicitly.
   # ---------------------------------------------------------------------------
   unifi-network-application:
-    image: lscr.io/linuxserver/unifi-network-application:10.1.89
+    image: lscr.io/linuxserver/unifi-network-application:10.3.58
     container_name: unifi-network-application
     depends_on:
       - unifi-db
