@@ -1,0 +1,83 @@
+services:
+  # ---------------------------------------------------------------------------
+  # AdGuard Home — DNS sinkhole + upstream forwarding to NextDNS
+  # Host networking so it can bind port 53 directly.
+  # Admin UI on port 3000 (initial setup) then 8081 after first-run config.
+  # ---------------------------------------------------------------------------
+  adguardhome:
+    image: adguard/adguardhome:v0.107.74
+    container_name: adguardhome
+    network_mode: host
+    restart: unless-stopped
+    volumes:
+      - ./adguardhome/conf:/opt/adguardhome/conf
+      - ./adguardhome/work:/opt/adguardhome/work
+
+  # ---------------------------------------------------------------------------
+  # MongoDB — backing store for UniFi Network Application
+  # Runs on the default bridge network (unifi-net), not exposed to the host.
+  # The init script creates the unifi DB user on first run only.
+  #
+  # Gated behind the "unifi" profile — only starts with `--profile unifi`.
+  # Default `docker compose up -d` brings up AdGuard Home only.
+  # ---------------------------------------------------------------------------
+  unifi-db:
+    image: mongo:7.0
+    container_name: unifi-db
+    profiles: ["unifi"]
+    restart: unless-stopped
+    networks:
+      - unifi-net
+    environment:
+      - MONGO_INITDB_ROOT_USERNAME=${MONGO_INITDB_ROOT_USERNAME}
+      - MONGO_INITDB_ROOT_PASSWORD=${MONGO_INITDB_ROOT_PASSWORD}
+      - MONGO_USER=${MONGO_USER}
+      - MONGO_PASS=${MONGO_PASS}
+      - MONGO_DBNAME=${MONGO_DBNAME}
+      - MONGO_AUTHSOURCE=${MONGO_AUTHSOURCE}
+    volumes:
+      - ./mongo/data:/data/db
+      - ./init-mongo.sh:/docker-entrypoint-initdb.d/init-mongo.sh:ro
+
+  # ---------------------------------------------------------------------------
+  # UniFi Network Application — wireless controller
+  # Bridge network for MongoDB access; host ports mapped explicitly.
+  #
+  # Gated behind the "unifi" profile — only starts with `--profile unifi`.
+  # ---------------------------------------------------------------------------
+  unifi-network-application:
+    image: lscr.io/linuxserver/unifi-network-application:10.3.58
+    container_name: unifi-network-application
+    profiles: ["unifi"]
+    depends_on:
+      - unifi-db
+    restart: unless-stopped
+    networks:
+      - unifi-net
+    ports:
+      - "8443:8443"           # Web admin (HTTPS)
+      - "8080:8080"           # Device inform
+      - "3478:3478/udp"       # STUN
+      - "10001:10001/udp"     # AP discovery
+      - "1900:1900/udp"       # L2 discovery (optional)
+      - "8843:8843"           # HTTPS portal redirect (optional)
+      - "8880:8880"           # HTTP portal redirect (optional)
+      - "6789:6789"           # Speed test (optional)
+    environment:
+      - PUID=${PUID}
+      - PGID=${PGID}
+      - TZ=${TZ}
+      - MONGO_USER=${MONGO_USER}
+      - MONGO_PASS=${MONGO_PASS}
+      - MONGO_HOST=unifi-db
+      - MONGO_PORT=27017
+      - MONGO_DBNAME=${MONGO_DBNAME}
+      - MONGO_AUTHSOURCE=${MONGO_AUTHSOURCE}
+      - MEM_LIMIT=${MEM_LIMIT}
+      - MEM_STARTUP=${MEM_STARTUP}
+    volumes:
+      - ./unifi/config:/config
+
+networks:
+  unifi-net:
+    driver: bridge

@@ -1,0 +1,78 @@
+# AdGuard Home configuration template.
+# Copy to AdGuardHome.yaml and adjust before first run, OR let AdGuard generate
+# one via the first-run wizard (port 3000) and edit afterward.
+#
+# The live AdGuardHome.yaml is gitignored because it contains a hashed admin
+# password and may include sensitive client names or rewrite targets. Keep this
+# template updated when you make structural changes so the repo stays
+# reproducible.
+
+http:
+  pprof:
+    port: 6060
+    enabled: false
+  address: 0.0.0.0:8081
+  session_ttl: 720h
+
+users:
+  # Generated on first run or via `htpasswd -B -C 10 -n admin`
+  - name: admin
+    password: GENERATE_BCRYPT_HASH_HERE
+
+dns:
+  bind_hosts:
+    - 0.0.0.0
+  port: 53
+
+  upstream_dns:
+    # NextDNS — replace XXXXXX with your NextDNS configuration ID
+    - https://dns.nextdns.io/XXXXXX
+  fallback_dns:
+    - https://dns.cloudflare.com/dns-query
+    - https://dns.google/dns-query
+  bootstrap_dns:
+    - 1.1.1.1
+    - 8.8.8.8
+
+  protection_enabled: true
+  blocking_mode: default
+  cache_size: 4194304
+  cache_ttl_min: 0
+  cache_ttl_max: 0
+  cache_optimistic: true
+
+  ratelimit: 0
+  edns_client_subnet:
+    enabled: false
+
+filtering:
+  safe_search:
+    enabled: false
+  rewrites: []
+  # Add local DNS rewrites here, e.g.:
+  # - domain: pi5.lan
+  #   answer: 192.168.x.x
+
+filters:
+  - enabled: true
+    url: https://adguardteam.github.io/HostlistsRegistry/assets/filter_1.txt
+    name: AdGuard DNS filter
+    id: 1
+  - enabled: true
+    url: https://adguardteam.github.io/HostlistsRegistry/assets/filter_2.txt
+    name: AdAway Default Blocklist
+    id: 2
+
+dhcp:
+  enabled: false
+
+log:
+  file: ""
+  max_backups: 0
+  max_size: 100
+  max_age: 3
+  compress: false
+  local_time: false
+  verbose: false
+
+schema_version: 29
