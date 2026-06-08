@@ -17,10 +17,14 @@ services:
   # MongoDB — backing store for UniFi Network Application
   # Runs on the default bridge network (unifi-net), not exposed to the host.
   # The init script creates the unifi DB user on first run only.
+  #
+  # Gated behind the "unifi" profile — only starts with `--profile unifi`.
+  # Default `docker compose up -d` brings up AdGuard Home only.
   # ---------------------------------------------------------------------------
   unifi-db:
     image: mongo:7.0
     container_name: unifi-db
+    profiles: ["unifi"]
     restart: unless-stopped
     networks:
       - unifi-net
@@ -38,10 +42,13 @@ services:
   # ---------------------------------------------------------------------------
   # UniFi Network Application — wireless controller
   # Bridge network for MongoDB access; host ports mapped explicitly.
+  #
+  # Gated behind the "unifi" profile — only starts with `--profile unifi`.
   # ---------------------------------------------------------------------------
   unifi-network-application:
     image: lscr.io/linuxserver/unifi-network-application:10.3.58
     container_name: unifi-network-application
+    profiles: ["unifi"]
     depends_on:
       - unifi-db
     restart: unless-stopped

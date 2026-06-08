@@ -102,3 +102,24 @@ configuration with device names.
   is not strictly required in git for a working deploy.
 - If full config-as-code is desired later, an Ansible vault or SOPS-encrypted file
   can replace the template approach.
+
+---
+
+## ADR-007: UniFi services gated behind a Compose profile
+
+**Context:** The two services don't have to run on the same host. UniFi may run
+elsewhere (e.g. a more powerful x86 box or UniFi OS Server), while the Pi handles only
+DNS. Forcing MongoDB + UniFi to start on every `docker compose up` wastes resources and
+adds failure surface when only AdGuard Home is wanted.
+
+**Decision:** Put `unifi-db` and `unifi-network-application` behind a `unifi` Compose
+profile. Default `docker compose up -d` starts AdGuard Home only; the full stack
+requires `docker compose --profile unifi up -d`.
+
+**Rationale:**
+- AdGuard-only is the common minimal deployment; it should be the zero-flag default.
+- The UniFi service definitions, config, and docs stay in the repo for later use —
+  nothing is removed, just made opt-in.
+- The day-2 backup script checks whether `unifi-db` is running before attempting a
+  `mongodump`, so it works correctly in either mode.
+- Lets a single repo serve both "DNS-only Pi" and "full consolidation" topologies.

@@ -17,6 +17,20 @@ UniFi APs ──inform:8080──▶ Pi (UniFi Network Application) ──▶ Mo
 
 See [docs/decisions.md](docs/decisions.md) for full rationale.
 
+## Deployment modes
+
+The UniFi services are gated behind a Docker Compose **profile**, so you can run
+AdGuard Home by itself or the full stack:
+
+| Mode                | Command                              | Services started                       |
+|---------------------|--------------------------------------|----------------------------------------|
+| AdGuard only (default) | `docker compose up -d`            | `adguardhome`                          |
+| Full stack          | `docker compose --profile unifi up -d` | `adguardhome`, `unifi-db`, `unifi-network-application` |
+
+If you only need DNS for now, use the default. The UniFi Phases below (1.2, 4.5–4.7)
+are optional — skip them unless you're running the controller here. To add UniFi
+later, just start the stack with `--profile unifi` and follow those phases.
+
 ---
 
 ## Prerequisites
@@ -126,13 +140,32 @@ sudo mkfs.ext4 /dev/nvme0n1p1
 # Mount and persist across reboots
 sudo mkdir -p /mnt/nvme
 sudo mount /dev/nvme0n1p1 /mnt/nvme
-echo '/dev/nvme0n1p1 /mnt/nvme ext4 defaults,noatime 0 2' | sudo tee -a /etc/fstab
+# NOTE: nofail is critical. Without it, if the NVMe isn't detected at boot
+# (Pi 5 PCIe/NVMe detection can be flaky), systemd blocks boot waiting for the
+# mount and drops to an emergency shell — the Pi appears dead and unreachable.
+echo '/dev/nvme0n1p1 /mnt/nvme ext4 defaults,noatime,nofail,x-systemd.device-timeout=10 0 2' | sudo tee -a /etc/fstab
 sudo chown -R $USER:$USER /mnt/nvme
+
+# ALWAYS validate fstab before rebooting — a bad entry is itself a boot-breaker
+sudo umount /mnt/nvme && sudo mount -a && mount | grep nvme
 ```
 
 If the NVMe has an old OS on it that interferes with boot, wipe its partition table
 from another machine first (e.g. `diskutil eraseDisk ExFAT NVME /dev/diskN` on macOS,
 or `sudo parted /dev/nvme0n1 mklabel gpt` from a working Pi boot).
+
+If NVMe detection is intermittent at boot (you sometimes see `NVME off` on the
+bootloader screen, or the Pi randomly fails to come back after a reboot), this is a
+known Pi 5 + third-party M.2 HAT signal-integrity issue. Force a slower PCIe link
+speed by adding to `/boot/firmware/config.txt`:
+
+```
+dtparam=pciex1
+dtparam=pciex1_gen=2
+```
+
+Drop to `_gen=1` if Gen 2 is still unstable. Also reseat the FPC ribbon cable on
+both ends.
 
 ### 2.2 NVMe boot order (Option A only)
 
@@ -172,25 +205,48 @@ curl https://download.argon40.com/argonneo5.sh | bash
 sudo reboot
 ```
 
-You can adjust fan curves later with `argonone-config`.
+After the second reboot, confirm the fan is being managed (not stuck at full speed):
+
+```bash
+vcgencmd measure_temp
+```
+
+A low idle temp with a quiet fan means it's working. (Note: the `argonone-config`
+tuning CLI is not always installed for the NEO 5 variant — the default fan curve is
+fine. Run `ls /usr/bin | grep -i argon` to see what control tools you have.)
 
 ### 2.4 Auto-boot after power loss
 
-By default, the Pi 5 enters a halted state when power is restored after an outage
-(unlike the Pi 4 which auto-boots). Fix this so it behaves like a headless server:
+The Pi 5 **auto-boots after a power outage by default** — no setting is required for
+this. The only thing that breaks it is `WAIT_FOR_POWER_BUTTON=1` together with
+`POWER_OFF_ON_HALT=1`, which forces a physical button press on the first power-up after
+the cable is reconnected.
+
+If your Pi requires a button press after an outage, check the EEPROM config:
+
+```bash
+rpi-eeprom-config | grep -E 'POWER_OFF_ON_HALT|WAIT_FOR_POWER_BUTTON|WAKE_ON_GPIO'
+```
+
+Ensure `WAIT_FOR_POWER_BUTTON` is `0` or absent. To change it:
 
 ```bash
 sudo rpi-eeprom-config --edit
+# Set (or remove the line entirely):
+#   WAIT_FOR_POWER_BUTTON=0
+# Save and exit, then reboot.
 ```
 
-Set these values (add them if missing):
+Notes:
+- `POWER_OFF_ON_HALT=1` (set by the Argon fan driver for low-power halt + its power
+  button) is fine and still auto-boots after an outage.
+- `WAKE_ON_GPIO` has no effect on the Pi 5 (it uses the dedicated power button, not
+  GPIO3).
+- If the Pi instead fails to come back after a *reboot* (not a power loss), that's a
+  boot hang, not a power setting — see the NVMe `nofail` note in Phase 2.1.
 
-```
-POWER_OFF_ON_HALT=0
-WAKE_ON_GPIO=1
-```
-
-Save and exit. The change takes effect on next reboot.
+Verify by actually cutting power at the wall/strip, waiting ~10s, and restoring it —
+the Pi should boot on its own without a button press.
 
 ### 2.5 Static IP
 
@@ -434,8 +490,11 @@ servers) to layer AdGuard's local filtering with the cloud service.
 
 ### 4.5 Start MongoDB + UniFi Network Application
 
+> **Optional — skip if you're running AdGuard Home only.** The UniFi services live
+> behind the `unifi` Compose profile, so they need the `--profile unifi` flag.
+
 ```bash
-docker compose up -d unifi-db
+docker compose --profile unifi up -d unifi-db
 ```
 
 Wait ~30 seconds for MongoDB to initialize and run the init script:
@@ -447,9 +506,12 @@ docker compose logs unifi-db | tail -20
 Confirm you see "Successfully added user" or similar, then start UniFi:
 
 ```bash
-docker compose up -d unifi-network-application
+docker compose --profile unifi up -d unifi-network-application
 docker compose logs -f unifi-network-application
 ```
+
+Tip: `docker compose --profile unifi up -d` starts the whole stack (AdGuard + both
+UniFi services) in one command.
 
 > **Note:** `Ctrl+C` here only stops the log tail — the container keeps running in
 > the background. Wait for startup to complete (~2 minutes on first run), then press
@@ -549,20 +611,23 @@ mkdir -p "$BACKUP_DIR"
 tar czf "$BACKUP_DIR/adguard-$TIMESTAMP.tar.gz" \
   -C "$SCRIPT_DIR" adguardhome/conf/ adguardhome/work/
 
-# --- UniFi: MongoDB dump (only the three UniFi databases) ---
-docker exec unifi-db mongodump \
-  --authenticationDatabase="$MONGO_AUTHSOURCE" \
-  -u "$MONGO_INITDB_ROOT_USERNAME" \
-  -p "$MONGO_INITDB_ROOT_PASSWORD" \
-  --nsInclude="${MONGO_DBNAME}.*" \
-  --nsInclude="${MONGO_DBNAME}_stat.*" \
-  --nsInclude="${MONGO_DBNAME}_audit.*" \
-  --archive --gzip \
-  > "$BACKUP_DIR/mongo-$TIMESTAMP.archive.gz"
+# --- UniFi (only if the UniFi stack is running) ---
+if docker ps --format '{{.Names}}' | grep -q '^unifi-db$'; then
+  # MongoDB dump (only the three UniFi databases)
+  docker exec unifi-db mongodump \
+    --authenticationDatabase="$MONGO_AUTHSOURCE" \
+    -u "$MONGO_INITDB_ROOT_USERNAME" \
+    -p "$MONGO_INITDB_ROOT_PASSWORD" \
+    --nsInclude="${MONGO_DBNAME}.*" \
+    --nsInclude="${MONGO_DBNAME}_stat.*" \
+    --nsInclude="${MONGO_DBNAME}_audit.*" \
+    --archive --gzip \
+    > "$BACKUP_DIR/mongo-$TIMESTAMP.archive.gz"
 
-# --- UniFi: config dir (certs, system.properties, autobackup .unf files) ---
-tar czf "$BACKUP_DIR/unifi-config-$TIMESTAMP.tar.gz" \
-  -C "$SCRIPT_DIR" unifi/config/
+  # config dir (certs, system.properties, autobackup .unf files)
+  tar czf "$BACKUP_DIR/unifi-config-$TIMESTAMP.tar.gz" \
+    -C "$SCRIPT_DIR" unifi/config/
+fi
 
 # --- Prune old backups ---
 find "$BACKUP_DIR" -name "*.tar.gz" -mtime +$RETENTION_DAYS -delete
@@ -602,8 +667,14 @@ Optionally `rsync` the backup directory to another host for off-device redundanc
 4. Pull and restart:
 
 ```bash
+# AdGuard-only deployment:
 docker compose pull
 docker compose up -d
+
+# Full stack (include UniFi services):
+docker compose --profile unifi pull
+docker compose --profile unifi up -d
+
 docker compose logs -f    # watch for errors
 ```
 
@@ -617,13 +688,14 @@ git push
 
 ### Recovery test
 
-Periodically verify that a full restore works. There are two restore paths:
+Periodically verify that a full restore works (UniFi only — requires the `unifi`
+profile). There are two restore paths:
 
 **Option A — Restore from `.unf` file (simpler, recommended):**
 
-1. Stop the stack: `docker compose down`
+1. Stop the stack: `docker compose --profile unifi down`
 2. Move data aside: `mv unifi/config unifi/config.bak && sudo mv mongo/data mongo/data.bak`
-3. Start fresh: `docker compose up -d`
+3. Start fresh: `docker compose --profile unifi up -d`
 4. Open `https://<pi-ip>:8443`, choose **Restore from a previous backup** in the wizard.
 5. Upload a `.unf` file (from `backups/` or from `unifi/config.bak/data/backup/autobackup/`).
 6. Confirm APs reconnect, data is present, DNS still works.
@@ -631,9 +703,9 @@ Periodically verify that a full restore works. There are two restore paths:
 
 **Option B — Restore from `mongodump` archive (preserves full DB state):**
 
-1. Stop the stack: `docker compose down`
+1. Stop the stack: `docker compose --profile unifi down`
 2. Move data aside: `mv unifi/config unifi/config.bak && sudo mv mongo/data mongo/data.bak`
-3. Start only MongoDB: `docker compose up -d unifi-db`
+3. Start only MongoDB: `docker compose --profile unifi up -d unifi-db`
 4. Wait ~15 seconds for MongoDB to initialize, then restore:
 
 ```bash
@@ -650,7 +722,7 @@ docker exec -i unifi-db mongorestore \
 ```
 
 5. Restore the config directory: `tar xzf backups/unifi-config-<TIMESTAMP>.tar.gz -C .`
-6. Start UniFi: `docker compose up -d unifi-network-application`
+6. Start UniFi: `docker compose --profile unifi up -d unifi-network-application`
 7. Confirm APs reconnect, data is present, DNS still works.
 8. Clean up: `rm -rf unifi/config.bak && sudo rm -rf mongo/data.bak`
 
