@@ -126,13 +126,18 @@ and optionally Wi-Fi.
 unreliable):**
 
 Image a microSD card with Raspberry Pi OS Lite (64-bit) using the same Imager
-settings. Boot from the SD card, then format and mount the NVMe for Docker data:
+settings. Boot from the SD card, then update the OS and format/mount the NVMe for
+Docker data:
 
 ```bash
+# Update the OS and firmware first — keeps rpi-eeprom current and avoids
+# bootloader/EEPROM quirks during the Argon and boot-order steps below
+sudo apt update && sudo apt full-upgrade -y
+
 # Confirm the NVMe is detected
 lsblk
 
-# Wipe and create a single ext4 partition
+# Wipe and create a single ext4 partition (this erases the entire NVMe)
 sudo parted /dev/nvme0n1 mklabel gpt
 sudo parted /dev/nvme0n1 mkpart primary ext4 0% 100%
 sudo mkfs.ext4 /dev/nvme0n1p1
@@ -148,11 +153,10 @@ sudo chown -R $USER:$USER /mnt/nvme
 
 # ALWAYS validate fstab before rebooting — a bad entry is itself a boot-breaker
 sudo umount /mnt/nvme && sudo mount -a && mount | grep nvme
-```
 
-If the NVMe has an old OS on it that interferes with boot, wipe its partition table
-from another machine first (e.g. `diskutil eraseDisk ExFAT NVME /dev/diskN` on macOS,
-or `sudo parted /dev/nvme0n1 mklabel gpt` from a working Pi boot).
+# Reload systemd so it picks up the new fstab entry (clears the "fstab modified" hint)
+sudo systemctl daemon-reload
+```
 
 If NVMe detection is intermittent at boot (you sometimes see `NVME off` on the
 bootloader screen, or the Pi randomly fails to come back after a reboot), this is a
@@ -733,6 +737,56 @@ docker compose ps                # quick status
 docker stats --no-stream         # resource usage
 docker compose logs <service> --tail 50
 ```
+
+---
+
+## Troubleshooting
+
+### AdGuard Home crash-loops with "address already in use"
+
+```
+panic: listen tcp 0.0.0.0:80: bind: address already in use
+```
+
+Something else on the host already owns the port AdGuard wants (port 80 if you set the
+admin UI to 80, or port 53 for DNS). Find the offender and stop it:
+
+```bash
+sudo ss -tlnp | grep -E ':80 |:53 '
+```
+
+Common culprits:
+- **apache2 / nginx** on port 80 — often installed accidentally (e.g. just to get
+  `htpasswd` for a password hash). Stop and disable it: `sudo systemctl disable --now apache2`.
+  You don't need a full web server for a bcrypt hash — AdGuard's first-run wizard makes
+  one, or use `docker run --rm httpd:alpine htpasswd -nbB admin 'password'`.
+- **systemd-resolved** on port 53 — see Phase 3.3.
+
+### NVMe not detected / drops out (Pi 5 + M.2 HAT)
+
+If `lsblk` is missing `nvme0n1`, or `dmesg` shows `nvme nvme0: Device not ready;
+aborting initialisation, CSTS=0x0`, the PCIe link is too aggressive for the HAT.
+Check the negotiated speed:
+
+```bash
+dmesg | grep 'link up'    # 8.0 GT/s = Gen 3 (unstable on most HATs); 5.0 = Gen 2
+```
+
+Force a slower, stable speed in `/boot/firmware/config.txt` (`dtparam=pciex1_gen=2`,
+or `=1` if Gen 2 still drops), then reboot. See Phase 2.1. The `nofail` fstab option
+ensures the Pi still boots and stays reachable even when the NVMe is absent.
+
+### Data silently landing on the SD card instead of the NVMe
+
+If the NVMe fails to mount, the `/mnt/nvme` path falls through to the SD card and
+writes go there silently. Verify where data actually lives:
+
+```bash
+findmnt /mnt/nvme    # SOURCE must be /dev/nvme0n1p1, not /dev/mmcblk0p2
+```
+
+The `RequiresMountsFor=/mnt/nvme` Docker drop-in (Phase 4) prevents this by refusing
+to start Docker unless the NVMe is mounted.
 
 ---
 
