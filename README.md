@@ -145,9 +145,7 @@ sudo mkfs.ext4 /dev/nvme0n1p1
 # Mount and persist across reboots
 sudo mkdir -p /mnt/nvme
 sudo mount /dev/nvme0n1p1 /mnt/nvme
-# NOTE: nofail is critical. Without it, if the NVMe isn't detected at boot
-# (Pi 5 PCIe/NVMe detection can be flaky), systemd blocks boot waiting for the
-# mount and drops to an emergency shell — the Pi appears dead and unreachable.
+# nofail lets the Pi boot normally even if the NVMe is ever absent (instead of hanging)
 echo '/dev/nvme0n1p1 /mnt/nvme ext4 defaults,noatime,nofail,x-systemd.device-timeout=10 0 2' | sudo tee -a /etc/fstab
 sudo chown -R $USER:$USER /mnt/nvme
 
@@ -157,19 +155,6 @@ sudo umount /mnt/nvme && sudo mount -a && mount | grep nvme
 # Reload systemd so it picks up the new fstab entry (clears the "fstab modified" hint)
 sudo systemctl daemon-reload
 ```
-
-If NVMe detection is intermittent at boot (you sometimes see `NVME off` on the
-bootloader screen, or the Pi randomly fails to come back after a reboot), this is a
-known Pi 5 + third-party M.2 HAT signal-integrity issue. Force a slower PCIe link
-speed by adding to `/boot/firmware/config.txt`:
-
-```
-dtparam=pciex1
-dtparam=pciex1_gen=2
-```
-
-Drop to `_gen=1` if Gen 2 is still unstable. Also reseat the FPC ribbon cable on
-both ends.
 
 ### 2.2 NVMe boot order (Option A only)
 
@@ -246,8 +231,6 @@ Notes:
   button) is fine and still auto-boots after an outage.
 - `WAKE_ON_GPIO` has no effect on the Pi 5 (it uses the dedicated power button, not
   GPIO3).
-- If the Pi instead fails to come back after a *reboot* (not a power loss), that's a
-  boot hang, not a power setting — see the NVMe `nofail` note in Phase 2.1.
 
 Verify by actually cutting power at the wall/strip, waiting ~10s, and restoring it —
 the Pi should boot on its own without a button press.
@@ -761,32 +744,6 @@ Common culprits:
   You don't need a full web server for a bcrypt hash — AdGuard's first-run wizard makes
   one, or use `docker run --rm httpd:alpine htpasswd -nbB admin 'password'`.
 - **systemd-resolved** on port 53 — see Phase 3.3.
-
-### NVMe not detected / drops out (Pi 5 + M.2 HAT)
-
-If `lsblk` is missing `nvme0n1`, or `dmesg` shows `nvme nvme0: Device not ready;
-aborting initialisation, CSTS=0x0`, the PCIe link is too aggressive for the HAT.
-Check the negotiated speed:
-
-```bash
-dmesg | grep 'link up'    # 8.0 GT/s = Gen 3 (unstable on most HATs); 5.0 = Gen 2
-```
-
-Force a slower, stable speed in `/boot/firmware/config.txt` (`dtparam=pciex1_gen=2`,
-or `=1` if Gen 2 still drops), then reboot. See Phase 2.1. The `nofail` fstab option
-ensures the Pi still boots and stays reachable even when the NVMe is absent.
-
-### Data silently landing on the SD card instead of the NVMe
-
-If the NVMe fails to mount, the `/mnt/nvme` path falls through to the SD card and
-writes go there silently. Verify where data actually lives:
-
-```bash
-findmnt /mnt/nvme    # SOURCE must be /dev/nvme0n1p1, not /dev/mmcblk0p2
-```
-
-The `RequiresMountsFor=/mnt/nvme` Docker drop-in (Phase 4) prevents this by refusing
-to start Docker unless the NVMe is mounted.
 
 ---
 
